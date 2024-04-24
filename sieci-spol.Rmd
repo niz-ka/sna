@@ -1,0 +1,274 @@
+---
+title: "Analiza skandalu korupcyjnego w Czechach"
+author: "Kamil Niżnik & Julia Lamperska"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    fig_width: 9
+    fig_height: 7
+---
+
+<style type="text/css">
+body {
+font-size: 16px;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+library(tools)
+library(igraph)
+library(dplyr)
+library(plotly)
+library(knitr)
+library(RColorBrewer)
+library(packcircles)
+
+theme_update(plot.title = element_text(hjust = 0.5))
+PAL <- c("#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3")
+BASE_COLOR <- "#66C2A5"
+```
+
+
+```{r read_data, cache=TRUE, echo=FALSE}
+# Change if necessary
+MD5 <- "bdd7b8782f0bd331ff2d2903d5ea56e9"
+URL <- "https://drive.usercontent.google.com/uc?id=1gNZyz4WNNNdS480gxRtFhsJ9ITVa0s_w&export=download"
+
+temp <- tempfile()
+download.file(URL,temp)
+if(md5sum(temp) != MD5) {
+  stop(paste("Data md5 checksum is invalid:", md5sum(temp), sep = " "))
+}
+
+net <- temp %>%
+  unz("CSV/CZECH_CORRUPTION.csv") %>%
+  read.csv(header = TRUE, row.names = 1) %>%
+  as.matrix %>%
+  graph_from_adjacency_matrix(mode = "undirected", weighted = TRUE)
+
+unlink(temp)
+```
+
+# Wstęp
+
+## Dane
+Dane zostały pozyskane z UCINET Software ([https://sites.google.com/site/ucinetsoftware/datasets/covert-networks/czech-corruption](https://sites.google.com/site/ucinetsoftware/datasets/covert-networks/czech-corruption)). Analizowany zbiór danych o nazwie **CZECH CORRUPTION** pochodzi z czeskiej bazy danych *Newton Media Search* i agreguje dane z najważniejszych czeskich gazet z okresu 4 czerwca 2013 do 4 czerwca 2014 roku. Dane opisują [czeski skandal korupcyjny](https://cs.wikipedia.org/wiki/Kauza_Nagyov%C3%A1). 
+
+## Rzut oka na graf
+```{r density_centralization_diameter, echo=FALSE}
+net.density <- edge_density(net)
+net.centralization <- centr_betw(net, normalized=T)$centralization
+net.diameter <- diameter(net)
+
+data_circle <- data.frame(group = c(paste("Gęstość\n", round(net.density, 3)),
+                                    paste("Współczynnik centralizacji\n", round(net.centralization,3)),
+                                    paste("Średnica\n", net.diameter),
+                                    paste("Liczba wierzchołków\n", length(V(net))),
+                                    paste("Liczba krawędzi\n", length(E(net)))), 
+                          value = rep(50, 5))
+packing <- circleProgressiveLayout(data_circle$value, sizetype='area')
+data_circle <- cbind(data_circle, packing)
+dat.gg <- circleLayoutVertices(packing, npoints=50)
+
+ggplot() + 
+  geom_polygon(data = dat.gg, aes(x, y, group = id, fill=as.factor(id)), colour = "white", alpha = 0.6) +
+  geom_text(data = data_circle, aes(x, y, size=value, label = group)) +
+  scale_size_continuous(range = c(1,7)) +
+  scale_fill_brewer(palette = 2, type = "qual") +
+  theme_void() + 
+  theme(legend.position="none") +
+  coord_equal()
+```
+
+```{r graph, fig.height=30, fig.width=30, echo=FALSE}
+LAYOUT <- net %>% 
+  layout_with_kk %>%
+  norm_coords(ymin=-1, ymax=1, xmin=-1, xmax=1)
+
+plot(net,
+     layout = LAYOUT,
+     vertex.label.cex = 3,
+     vertex.label.family = "sans-serif",
+     vertex.label.color = "black",
+     vertex.label = gsub("_", "\n", V(net)$name),
+     vertex.color = PAL[1],
+     vertex.size = 22,
+     edge.width = E(net)$weight * 3,
+     edge.color = "#6b6b6b"
+)
+title("Podstawowa wizualizacja grafu", cex.main=5)
+```
+
+Analizowany graf jest grafem ważonym, nieskierowanym, zawierającym 16 wierzchołków i 50 krawędzi. Każdy wierzchołek odpowiada osobie zaangażowanej w aferę, natomiast każda krawędź reprezentuje współwystępowanie dwóch osób w jednym artykule w gazecie. Wagi krawędzi (na wizualizacji - grubość krawędzi) mieszczą się w zakresie od 0 do 10 i oznaczają siłę współwystępowania. Największą siłę współwystępowania (10) ma Nagyova--Necas. Wszystkie pozostałe krawędzie zostały przekształcone poprzez podzielenie całkowitej liczby współwystąpień obu osób przez wartość najsilniejszego powiązania. Procentom przypisano pozostałe wartości 0-9.
+
+## Problemy do analizy
+W ramach analizy poszukiwane są odpowiedzi na następujące pytania:
+<ol>
+<li>Kto może być najważniejszą osobą zaangażowaną w skandal?</li>
+<li>Czy osoby zaangażowane w skandal można podzielić na mniejsze grupy?</li>
+</ol>
+
+# Stopnie wierzchołków
+```{r degree, echo=FALSE}
+(net %>%
+  degree %>%
+  as.data.frame %>%
+  rename(degree = 1) %>%
+  mutate(vertex = V(net)$name) %>%
+  mutate(vertex = reorder(vertex, degree)) %>%
+  ggplot(aes(x = vertex, y = degree)) +
+    geom_bar(stat = "identity", fill = PAL[2]) +
+    scale_fill_identity() +
+    labs(x = "Wierzchołek", y = "Stopień", title = "Rozkład stopni wierzchołków") +
+    scale_y_continuous(breaks = seq(0, 14, 2)) +
+    coord_flip()) %>%
+  ggplotly
+```
+
+```{r degree_net, fig.height=30, fig.width=30, echo=FALSE}
+V(net)$degree <- degree(net)
+
+plot(net,
+     layout = LAYOUT,
+     vertex.label.cex = 3,
+     vertex.label.family = "sans-serif",
+     vertex.label.color = "#000000",
+     vertex.label = gsub("_", "\n", V(net)$name),
+     vertex.color = PAL[3],
+     vertex.size = V(net)$degree * 2.5,
+     edge.width = E(net)$weight * 3,
+     edge.color = "#d1d1d1"
+)
+title("Wizualizacja stopni wierzchołków", cex.main=5)
+```
+Na podstawie rozkładu stopni wierzchołków można zauważyć, że w artykułach bardzo często wśród osób zaangażowanych pojawiają się Petr Nečas oraz Jana Nagyová. 
+
+Nie jest to zaskakujące. Petr Nečas był ówczesnym premierem, a Jana Nagyová zaufaną szefową jego gabinetu. W 2013 roku wyszło na jaw, że para ma romans, a Nagyová używała wywiadu wojskowego do szpiegowania jego żony i szukania dowodów na jej niewierność. Rząd Nečasa upadł, Nagyová usłyszała zarzuty, ale para pobrała się.
+
+# Najkrótsze ścieżki
+```{r shortest_paths, echo=FALSE}
+(net %>%
+  distances %>%
+  as.vector %>%
+  as.data.frame %>%
+  rename(shortest_path = 1) %>%
+  mutate(shortest_path = ifelse(is.finite(shortest_path), shortest_path, "Inf")) %>%
+  group_by(shortest_path) %>%
+  summarise(count = n()) %>%
+  mutate(shortest_path = reorder(shortest_path, -count)) %>%
+  ggplot(aes(x = shortest_path, y = count)) +
+    geom_bar(stat = "identity", fill = PAL[4]) +
+    scale_fill_identity() +
+    labs(x = "Długość najkrótszej ścieżki", y = "Liczba wystąpień", title = "Rozkład najkrótszych ścieżek")) %>%
+  ggplotly
+```
+
+# Pośrednictwo
+```{r betweenness, echo=FALSE}
+(net %>%
+  betweenness %>%
+  as.data.frame %>%
+  rename(betweenness = 1) %>%
+  mutate(vertex = V(net)$name) %>%
+  mutate(vertex = reorder(vertex, betweenness)) %>%
+  ggplot(aes(x = vertex, y = betweenness)) +
+    geom_bar(stat = "identity", fill = PAL[5]) +
+    scale_fill_identity() +
+    labs(x = "Wierzchołek", y = "Pośrednictwo", title = "Rozkład pośrednictwa wierzchołków") +
+    scale_y_continuous(breaks = seq(0, 20, 2)) +
+    coord_flip()) %>%
+  ggplotly
+```
+
+```{r betweenness_net, fig.height=30, fig.width=30, echo=FALSE}
+V(net)$betweenness <- betweenness(net)
+
+plot(net,
+     layout = LAYOUT,
+     vertex.label.cex = 3,
+     vertex.label.family = "sans-serif",
+     vertex.label.color = "#000000",
+     vertex.label = gsub("_", "\n", V(net)$name),
+     vertex.color = PAL[6],
+     vertex.size = V(net)$betweenness * 2.0,
+     edge.width = E(net)$weight * 3,
+     edge.color = "#d1d1d1"
+)
+title("Wizualizacja pośrednictwa wierzchołków", cex.main=5)
+```
+
+Okazuje się, że największe pośrednictwo posiada wierzchołek reprezentujący Ondreja Páleníka, oficera wojskowego i ówczesnego szefa wywiadu wojskowego. To on na polecenie Nagyovej śledził żonę premiera. Roman Janoušek jest natomiast wypływowym miliarderem i lobbystą, skazanym na 4,5 roku więzienia za spowodowanie wypadku drogowego. W sprawie skandalu korupcyjnego nie postawiono mu jednak zarzutów.
+
+
+# Współczynnik grupowania
+```{r clustering_coefficient, echo=FALSE, warning=FALSE}
+(net %>%
+  transitivity(type="local") %>%
+  as.data.frame %>%
+  rename(clustering = 1) %>%
+  mutate(vertex = V(net)$name, clustering = ifelse(is.nan(clustering), 0, clustering)) %>%
+  mutate(vertex = reorder(vertex, clustering)) %>%
+  ggplot(aes(x = vertex, y = clustering)) +
+    geom_bar(stat = "identity", fill = PAL[7]) +
+    scale_fill_identity() +
+    labs(x = "Wierzchołek", y = "Lokalny współczynnik grupowania", title = "Rozkład lokalnego współczynnika grupowania") +
+    coord_flip()) %>%
+  ggplotly
+```
+
+# Społeczności
+```{r modules, fig.height=30, fig.width=30, echo=FALSE}
+net.communities <- cluster_optimal(net)
+V(net)$communities <- net.communities$membership
+colors <- brewer.pal(max(V(net)$communities), "Set2")
+plot(net,
+     layout = LAYOUT,
+     vertex.label.cex = 3,
+     vertex.label.family = "sans-serif",
+     vertex.label.color = "#000000",
+     vertex.label = gsub("_", "\n", V(net)$name),
+     vertex.color = colors[V(net)$communities],
+     vertex.size = 22,
+     edge.width = E(net)$weight * 3,
+     edge.color = "#6b6b6b"
+)
+title("Wizualizacja społeczności grafu", cex.main=5)
+```
+
+Algorytm `cluster_optimal` zidentyfikował następujące 3 społeczności (pomijając społeczności będące wierzchołkiem izolowanym):
+
+* Pierwsza (świat polityczno-biznesowy)
+  * Petr Nečas - premier Czech
+  * Jana Nagyová - szefowa gabinetu premiera Nečasa
+  * Lubomir Poul - szef urzędu rady ministrów (przełożony Nagyovej)
+  * Ivo Rittig - kontrowersyjny biznesmen i lobbysta, w latach 80. skazany za defraudację
+  * Tomáš Hrdlička - przedsiębiorca i członek Obywatelskiej Partii Demokratycznej (ODS)
+  * Roman Janoušek - przedsiębiorca miliarder, lobbysta
+* Druga (wywiad wojskowy)
+  * Ondrej Páleník - szef wywiadu wojskowego
+  * Milan Kovanda - szef wywiadu wojskowego
+  * Jan Pohůnek - szef departamentu kontroli zewnętrznej wywiadu wojskowego
+* Trzecia (sprawa korupcyjna trzech posłów)
+  * Ivan Fuksa - poseł ODS
+  * Petr Tluchoř - poseł ODS
+  * Marek Šnajdr - poseł ODS
+  * Roman Boček - wicepremier, ODS ("most")
+
+Poza tym:
+
+* Václav Ryba - przedsiębiorca
+* Jiří Toman - przedsiębiorca, urząd miasta Pragi
+* Libor Grygárek - ważny prokurator prokuratury w Pradze
+
+Skąd taki podział? Afera składa się z kilku osobnych spraw (karnych): <br>
+1. **Sprawa korupcyjna** - Ivan Fuksa, Petr Tluchoř,  Marek Šnajdr, Petr Nečas, Jana Nagyová, Roman Boček zostali oskarżeni o korupcję. Według policji Roman Boček był mostem między Nagyovą a trzema posłami ODS. <br>
+2. **Ujawnianie informacji niejawnych** - Jana Nagyová, Ivo Rittig zostali oskarżeni o ujawnianie informacji niejawnych. <br>
+3. **Sprawa korupcyjna Nagyovej** - w zamian za korzyści miała zapewniać dostęp do premiera. <br>
+4. **Nadużycie wywiadu wojskowego** - Jana Nagyová, Ondrej Páleník, Milan Kovanda, Jan Pohůnek oskarżeni o wykorzystanie wywiadu wojskowego do śledzenia żony premiera. <br>
+
+<br>
+*Źródło*: [Kauza Nagyová - Wikipedia](https://cs.wikipedia.org/wiki/Kauza_Nagyov%C3%A1)
